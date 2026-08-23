@@ -1,0 +1,11 @@
+streamlit
+python-dotenv
+pypdf
+langchain
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-ollama
+sentence-transformers
+torch
+rank-bm25
