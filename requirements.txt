@@ -1,8 +1,11 @@
 streamlit
 python-dotenv
 pypdf
+langchain
 langchain-community
 langchain-text-splitters
 langchain-huggingface
-sentence-transformers
 langchain-groq
+sentence-transformers
+torch
+rank-bm25
