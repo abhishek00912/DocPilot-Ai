@@ -75,7 +75,7 @@ if not groq_api_key:
 # ============================================================
 
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="openai/gpt-oss-20b",
     temperature=0,
     api_key=groq_api_key
 )
@@ -594,32 +594,25 @@ if (
         prompt = f"""
 You are DocPilot AI, an intelligent PDF assistant.
 
-Answer the user's question using ONLY the
-information provided in the context.
+Your primary source is the uploaded PDF.
 
-The context was retrieved using:
+First, try to answer the question using the
+retrieved PDF context.
 
-1. Semantic vector search
-2. BM25 keyword search
-3. Hybrid ranking
+If the PDF contains the answer:
+- Answer using the PDF.
+- Do not unnecessarily add outside information.
 
-Use the retrieved context carefully.
+If the PDF does NOT contain enough information:
+- You may use your general knowledge to provide
+  a helpful answer.
+- Clearly mention that the additional information
+  comes from general knowledge and is not from
+  the uploaded PDF.
 
-Do NOT use outside knowledge.
+Do NOT invent facts.
 
-Do NOT guess or make up information.
-
-If the answer is available in the provided
-context, answer the question directly.
-
-If the answer is not available in the context,
-respond exactly:
-
-"I couldn't find the answer in the uploaded PDF."
-
-Keep the answer clear, accurate and concise.
-
-Context:
+Context from uploaded PDF:
 ------------------------------
 {context}
 ------------------------------
