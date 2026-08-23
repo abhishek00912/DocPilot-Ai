@@ -1,13 +1,35 @@
 from dotenv import load_dotenv
-load_dotenv()
-
+import os
 import streamlit as st
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from langchain_community.vectorstores import InMemoryVectorStore
+from langchain_community.retrievers import BM25Retriever
+
+
+# ============================================================
+# LOAD ENVIRONMENT VARIABLES
+# ============================================================
+
+load_dotenv()
+
+
+# ============================================================
+# GET GROQ API KEY
+# Works locally with .env
+# Works on Streamlit Cloud with Secrets
+# ============================================================
+
+groq_api_key = os.getenv("GROQ_API_KEY")
+
+if not groq_api_key:
+    try:
+        groq_api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        groq_api_key = None
 
 
 # ============================================================
@@ -22,12 +44,40 @@ st.set_page_config(
 
 
 # ============================================================
+# CHECK API KEY
+# ============================================================
+
+if not groq_api_key:
+
+    st.error(
+        "❌ GROQ_API_KEY not found."
+    )
+
+    st.info(
+        """
+        For local development:
+
+        Create a `.env` file and add:
+
+        GROQ_API_KEY=your_new_groq_key
+
+        For Streamlit Cloud:
+
+        Add GROQ_API_KEY inside App Settings → Secrets.
+        """
+    )
+
+    st.stop()
+
+
+# ============================================================
 # LLM
 # ============================================================
 
-llm = ChatOllama(
-    model="llama3.2:3b",
-    temperature=0
+llm = ChatGroq(
+    model="llama-3.1-8b-instant",
+    temperature=0,
+    api_key=groq_api_key
 )
 
 
@@ -38,6 +88,12 @@ llm = ChatOllama(
 if "vector_db" not in st.session_state:
     st.session_state.vector_db = None
 
+if "vector_retriever" not in st.session_state:
+    st.session_state.vector_retriever = None
+
+if "bm25_retriever" not in st.session_state:
+    st.session_state.bm25_retriever = None
+
 if "document_uploaded" not in st.session_state:
     st.session_state.document_uploaded = False
 
@@ -46,6 +102,87 @@ if "chat_history" not in st.session_state:
 
 if "file_name" not in st.session_state:
     st.session_state.file_name = None
+
+
+# ============================================================
+# HYBRID SEARCH
+# ============================================================
+
+def hybrid_search(
+    query,
+    vector_retriever,
+    bm25_retriever,
+    k=8
+):
+
+    # --------------------------------------------------------
+    # Vector Search
+    # --------------------------------------------------------
+
+    vector_docs = vector_retriever.invoke(
+        query
+    )
+
+    # --------------------------------------------------------
+    # BM25 Search
+    # --------------------------------------------------------
+
+    bm25_docs = bm25_retriever.invoke(
+        query
+    )
+
+    # --------------------------------------------------------
+    # Reciprocal Rank Fusion
+    # --------------------------------------------------------
+
+    scores = {}
+    documents = {}
+
+    # Vector search weight = 0.65
+
+    for rank, doc in enumerate(vector_docs):
+
+        content = doc.page_content
+
+        if content not in scores:
+            scores[content] = 0
+
+        if content not in documents:
+            documents[content] = doc
+
+        scores[content] += (
+            0.65 / (rank + 1)
+        )
+
+    # BM25 search weight = 0.35
+
+    for rank, doc in enumerate(bm25_docs):
+
+        content = doc.page_content
+
+        if content not in scores:
+            scores[content] = 0
+
+        if content not in documents:
+            documents[content] = doc
+
+        scores[content] += (
+            0.35 / (rank + 1)
+        )
+
+    # --------------------------------------------------------
+    # Rank Documents
+    # --------------------------------------------------------
+
+    ranked_documents = sorted(
+        documents.values(),
+        key=lambda doc: scores[
+            doc.page_content
+        ],
+        reverse=True
+    )
+
+    return ranked_documents[:k]
 
 
 # ============================================================
@@ -67,34 +204,73 @@ def document_process(path):
     # --------------------------------------------------------
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=150
+        chunk_size=800,
+        chunk_overlap=120
     )
 
-    docs = splitter.split_documents(docs)
+    docs = splitter.split_documents(
+        docs
+    )
 
     # --------------------------------------------------------
     # 3. HuggingFace Embeddings
     # --------------------------------------------------------
 
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name=(
+            "sentence-transformers/"
+            "all-MiniLM-L6-v2"
+        )
     )
 
     # --------------------------------------------------------
     # 4. Vector Store
     # --------------------------------------------------------
 
-    vector_db = InMemoryVectorStore.from_documents(
-        documents=docs,
-        embedding=embeddings
+    vector_db = (
+        InMemoryVectorStore.from_documents(
+            documents=docs,
+            embedding=embeddings
+        )
     )
 
     # --------------------------------------------------------
-    # 5. Save Vector Store
+    # 5. Vector Retriever
+    # --------------------------------------------------------
+
+    vector_retriever = (
+        vector_db.as_retriever(
+            search_type="similarity",
+            search_kwargs={
+                "k": 8
+            }
+        )
+    )
+
+    # --------------------------------------------------------
+    # 6. BM25 Retriever
+    # --------------------------------------------------------
+
+    bm25_retriever = (
+        BM25Retriever.from_documents(
+            docs,
+            k=8
+        )
+    )
+
+    # --------------------------------------------------------
+    # 7. Save Components
     # --------------------------------------------------------
 
     st.session_state.vector_db = vector_db
+
+    st.session_state.vector_retriever = (
+        vector_retriever
+    )
+
+    st.session_state.bm25_retriever = (
+        bm25_retriever
+    )
 
     st.session_state.document_uploaded = True
 
@@ -131,7 +307,10 @@ with st.sidebar:
             use_container_width=True
         ):
 
+            # ------------------------------------------------
             # Save PDF
+            # ------------------------------------------------
+
             with open(
                 "uploaded_document.pdf",
                 "wb"
@@ -141,20 +320,36 @@ with st.sidebar:
                     uploaded_file.getvalue()
                 )
 
-            # Reset previous chat
+            # ------------------------------------------------
+            # Reset Chat
+            # ------------------------------------------------
+
             st.session_state.chat_history = []
 
-            # Reset previous vector store
+            # ------------------------------------------------
+            # Reset Retrieval
+            # ------------------------------------------------
+
             st.session_state.vector_db = None
+
+            st.session_state.vector_retriever = None
+
+            st.session_state.bm25_retriever = None
 
             st.session_state.document_uploaded = False
 
-            # Save file name
+            # ------------------------------------------------
+            # Save File Name
+            # ------------------------------------------------
+
             st.session_state.file_name = (
                 uploaded_file.name
             )
 
-            # Process document
+            # ------------------------------------------------
+            # Process PDF
+            # ------------------------------------------------
+
             with st.spinner(
                 "📖 Reading and understanding your PDF..."
             ):
@@ -189,14 +384,14 @@ with st.sidebar:
     st.write("↓")
     st.write("🗂️ InMemoryVectorStore")
     st.write("↓")
-    st.write("🔎 Similarity Search")
+    st.write("🔎 Hybrid Search")
     st.write("↓")
-    st.write("🦙 Ollama Llama 3.2")
+    st.write("⚡ Groq LLM")
 
     st.divider()
 
     st.caption(
-        "DocPilot AI • HuggingFace + Ollama"
+        "DocPilot AI • HuggingFace + Groq"
     )
 
 
@@ -247,8 +442,8 @@ if not st.session_state.document_uploaded:
     with col3:
 
         st.metric(
-            "🦙 LLM",
-            "Ollama"
+            "⚡ LLM",
+            "Groq"
         )
 
     st.divider()
@@ -293,6 +488,10 @@ if (
     and st.session_state.vector_db is not None
 ):
 
+    # --------------------------------------------------------
+    # PDF READY
+    # --------------------------------------------------------
+
     st.success(
         f"📗 **{st.session_state.file_name}** "
         "is ready for questions."
@@ -301,12 +500,22 @@ if (
     st.subheader(
         "💬 Chat with your PDF"
     )
-    if st.button("🗑️ Clear Chat", use_container_width=True):
-     st.session_state.chat_history = []
-     st.rerun()
 
     # --------------------------------------------------------
-    # Display Chat History
+    # CLEAR CHAT
+    # --------------------------------------------------------
+
+    if st.button(
+        "🗑️ Clear Chat",
+        use_container_width=True
+    ):
+
+        st.session_state.chat_history = []
+
+        st.rerun()
+
+    # --------------------------------------------------------
+    # DISPLAY CHAT HISTORY
     # --------------------------------------------------------
 
     for message in st.session_state.chat_history:
@@ -320,7 +529,7 @@ if (
             )
 
     # --------------------------------------------------------
-    # Chat Input
+    # USER INPUT
     # --------------------------------------------------------
 
     query = st.chat_input(
@@ -345,19 +554,24 @@ if (
             st.write(query)
 
         # ====================================================
-        # SIMILARITY SEARCH
+        # HYBRID SEARCH
         # ====================================================
 
         with st.spinner(
             "🔎 Searching your document..."
         ):
 
-            documents = (
-                st.session_state.vector_db
-                .similarity_search(
-                    query,
-                    k=6
-                )
+            documents = hybrid_search(
+                query=query,
+                vector_retriever=(
+                    st.session_state
+                    .vector_retriever
+                ),
+                bm25_retriever=(
+                    st.session_state
+                    .bm25_retriever
+                ),
+                k=8
             )
 
         # ====================================================
@@ -383,14 +597,27 @@ You are DocPilot AI, an intelligent PDF assistant.
 Answer the user's question using ONLY the
 information provided in the context.
 
+The context was retrieved using:
+
+1. Semantic vector search
+2. BM25 keyword search
+3. Hybrid ranking
+
+Use the retrieved context carefully.
+
 Do NOT use outside knowledge.
+
+Do NOT guess or make up information.
+
+If the answer is available in the provided
+context, answer the question directly.
 
 If the answer is not available in the context,
 respond exactly:
 
 "I couldn't find the answer in the uploaded PDF."
 
-Keep the answer clear, accurate and easy to understand.
+Keep the answer clear, accurate and concise.
 
 Context:
 ------------------------------
@@ -402,7 +629,7 @@ Question:
 """
 
         # ====================================================
-        # OLLAMA RESPONSE
+        # GROQ RESPONSE
         # ====================================================
 
         with st.chat_message("assistant"):
@@ -414,9 +641,6 @@ Question:
                 result = llm.invoke(
                     prompt
                 )
-
-            # Ollama normally returns the answer
-            # directly as a string.
 
             answer = result.content
 
